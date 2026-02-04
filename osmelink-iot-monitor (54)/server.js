@@ -1,8 +1,12 @@
-
 import express from 'express';
 import cors from 'cors';
 import mongoose from 'mongoose';
 import axios from 'axios';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -15,10 +19,6 @@ const TOR_PASS = 'Muski@12';
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-
-// Render Health Checks
-app.get('/health', (req, res) => res.status(200).send('OK'));
-app.get('/', (req, res) => res.send('OsmeLink API is active.'));
 
 // --- DATABASE MODELS ---
 const TelemetrySchema = new mongoose.Schema({
@@ -49,7 +49,7 @@ const UserSchema = new mongoose.Schema({
 const Vehicle = mongoose.model('Vehicle', VehicleSchema);
 const User = mongoose.model('User', UserSchema);
 
-// --- DATA BRIDGE ---
+// --- INTEGRATED DATA BRIDGE ---
 let torAuthToken = null;
 
 const loginToTor = async () => {
@@ -90,14 +90,20 @@ const runDataBridge = async () => {
         },
         equipmentConfig: m
       };
-      await Vehicle.findOneAndUpdate({ id: hwid }, { $set: { ...node, lastUpdate: new Date() }, $addToSet: { history: { $each: [{ timestamp: v.ENTRYDATE || new Date().toISOString(), rawTor: v, metrics: node.metrics }], $position: 0, $slice: 200 } } }, { upsert: true });
+      await Vehicle.findOneAndUpdate(
+        { id: hwid }, 
+        { $set: { ...node, lastUpdate: new Date() }, 
+          $addToSet: { history: { $each: [{ timestamp: v.ENTRYDATE || new Date().toISOString(), rawTor: v, metrics: node.metrics }], $position: 0, $slice: 500 } } 
+        }, 
+        { upsert: true }
+      );
     }
   } catch (e) {
     if (e.response?.status === 401) torAuthToken = null;
   }
 };
 
-// --- API ---
+// --- API ROUTES ---
 app.get('/api/vehicles', async (req, res) => res.json(await Vehicle.find({}, '-history')));
 app.get('/api/telemetry/:id', async (req, res) => res.json(await Vehicle.findOne({ id: req.params.id })));
 app.post('/api/login', async (req, res) => {
@@ -106,11 +112,32 @@ app.post('/api/login', async (req, res) => {
   res.json(user ? { success: true, user } : { success: false });
 });
 
+// --- SERVE STATIC FRONTEND ---
+const distPath = path.join(__dirname, 'dist');
+app.use(express.static(distPath));
+
+// Health check
+app.get('/health', (req, res) => res.sendStatus(200));
+
+// Catch-all route for SPA
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
 // --- INIT ---
-if (!MONGODB_URI) { process.exit(1); }
+if (!MONGODB_URI) {
+  console.error("FATAL: MONGODB_URI is not defined.");
+  process.exit(1);
+}
+
 mongoose.connect(MONGODB_URI).then(() => {
+  console.log("Connected to MongoDB.");
   app.listen(port, '0.0.0.0', () => {
+    console.log(`Unified Server running on port ${port}`);
+    // Seed admin
     User.updateOne({ username: 'admin' }, { $setOnInsert: { username: 'admin', password: 'admin', role: 'Admin' } }, { upsert: true }).exec();
+    
+    // Start Bridge
     runDataBridge();
     setInterval(runDataBridge, 60000); 
   });
